@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>Spoiler-Free Player</title>
+<style>
+/* One dark stage, controls underneath. The player is always covered except while it's actually playing. */
+:root {
+  --bg: #0d0f12;
+  --stage: #000;
+  --curtain: #15181d;
+  --fg: #e9ecf1;
+  --muted: #8a93a3;
+  --accent: #fde100;
+  --btn: #232831;
+  --btn-hover: #2f3541;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; margin: 0; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 16px;
+}
+.label { color: var(--muted); font-size: 13px; letter-spacing: .06em; text-transform: uppercase; text-align: center; min-height: 1.4em; }
+.wrap {
+  position: relative; width: min(100%, calc((100vh - 150px) * 16 / 9)); aspect-ratio: 16 / 9;
+  background: var(--stage); border-radius: 6px; overflow: hidden;
+}
+.wrap:fullscreen { width: 100%; height: 100%; aspect-ratio: auto; border-radius: 0; }
+#player, .wrap iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+
+/* Layers, bottom to top: player, masks, shield, curtain, ring */
+.mask { position: absolute; background: var(--stage); z-index: 2; pointer-events: none; }
+.mask.top { left: 0; right: 0; top: 0; height: 18%; transition: opacity .5s; }
+.mask.corner { right: 0; top: 0; width: 32%; height: 15%; }
+.shield { position: absolute; inset: 0; z-index: 3; cursor: pointer; }
+.curtain {
+  position: absolute; inset: 0; z-index: 4; background: var(--curtain);
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  text-align: center; padding: 16px; pointer-events: none;
+}
+.curtain .big { font-size: 22px; font-weight: 600; }
+.curtain .small { color: var(--muted); font-size: 13px; max-width: 46ch; }
+.disc { width: 84px; height: 84px; border-radius: 50%; background: var(--accent); display: grid; place-items: center; }
+.disc::after { content: ""; margin-left: 7px; border-style: solid; border-width: 16px 0 16px 26px; border-color: transparent transparent transparent #111; }
+/* Before the first play, only the centre of the frame lets a click through to the player */
+.ring { position: absolute; z-index: 5; }
+.ring.t { left: 0; right: 0; top: 0; height: 35%; }
+.ring.b { left: 0; right: 0; bottom: 0; height: 35%; }
+.ring.l { left: 0; top: 35%; bottom: 35%; width: 35%; }
+.ring.r { right: 0; top: 35%; bottom: 35%; width: 35%; }
+
+.controls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; align-items: center; }
+button {
+  background: var(--btn); color: var(--fg); border: 0; border-radius: 6px; padding: 9px 14px;
+  font: inherit; cursor: pointer;
+}
+button:hover { background: var(--btn-hover); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button[aria-pressed="true"] { background: var(--accent); color: #111; }
+.clock { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: center; }
+.hint { color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="label" id="label"></div>
+
+<div class="wrap" id="wrap">
+  <div id="player"></div>
+  <div class="mask top" id="maskTop" hidden></div>
+  <div class="mask corner" id="maskCorner" hidden></div>
+  <div class="shield" id="shield" tabindex="-1" hidden></div>
+  <div class="curtain" id="curtain">
+    <div class="disc" id="disc"></div>
+    <div class="big" id="curtainBig">Loading…</div>
+    <div class="small" id="curtainSmall"></div>
+  </div>
+  <div class="ring t" id="ringT"></div><div class="ring b" id="ringB"></div>
+  <div class="ring l" id="ringL"></div><div class="ring r" id="ringR"></div>
+</div>
+
+<div class="controls">
+  <button id="btnBack" type="button" title="Back 10 seconds (←)">−10s</button>
+  <button id="btnPlay" type="button" title="Play / pause (Space)">Pause</button>
+  <button id="btnFwd" type="button" title="Forward 10 seconds (→)">+10s</button>
+  <span class="clock" id="clock">0:00</span>
+  <button id="btnRestart" type="button">Restart</button>
+  <button id="btnFull" type="button" title="Fullscreen (F)">Fullscreen</button>
+  <button id="btnClicks" type="button" aria-pressed="false" title="Let clicks reach the video, e.g. to skip an ad">Allow clicks</button>
+</div>
+<div class="hint">Space pause · ← → 10s · F fullscreen. The last 20 seconds are skipped, because YouTube can show other videos' thumbnails there.</div>
+
+<script>
+(() => {
+  const END_TRIM = 20;      // seconds cut from the end, where YouTube end-screen suggestions appear
+  const TOP_MASK_MS = 5000; // the title flashes at the top when playback starts or resumes
+
+  const $ = id => document.getElementById(id);
+  const params = new URLSearchParams(location.hash.slice(1));
+  const id = params.get("v") || "";
+  $("label").textContent = params.get("l") || "";
+  if (params.get("l")) document.title = params.get("l");
+
+  let player = null, mode = "loading", finished = false, trim = END_TRIM, topTimer = null;
+
+
+
+  function setCurtain(big, small, showDisc) {
+    $("curtain").hidden = false;
+    $("curtainBig").textContent = big;
+    $("curtainSmall").textContent = small || "";
+    $("disc").hidden = !showDisc;
+  }
+  function setRing(on) { ["ringT", "ringB", "ringL", "ringR"].forEach(r => $(r).hidden = !on); }
+  function flashTopMask() {
+    clearTimeout(topTimer);
+    $("maskTop").hidden = false;
+    $("maskTop").style.opacity = 1;
+    topTimer = setTimeout(() => { $("maskTop").style.opacity = 0; }, TOP_MASK_MS);
+  }
+  function fmt(s) { s = Math.max(0, Math.floor(s)); return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0"); }
+
+  if (!/^[A-Za-z0-9_-]{11}$/.test(id)) {
+    setCurtain("No video picked", "Open a video link from your sheet.", false);
+    setRing(true);
+    return;
+  }
+
+  setCurtain("Loading…", "", false);
+  setRing(true);
+
+  const tag = document.createElement("script");
+  tag.src = "https://www.youtube.com/iframe_api";
+  tag.onerror = () => { setCurtain("Couldn't reach YouTube", "Check your connection and reload.", false); };
+  document.head.appendChild(tag);
+
+  window.onYouTubeIframeAPIReady = () => {
+    player = new YT.Player("player", {
+      host: "https://www.youtube-nocookie.com",
+      videoId: id,
+      playerVars: {
+        controls: 0, rel: 0, iv_load_policy: 3, disablekb: 1, fs: 0,
+        playsinline: 1, modestbranding: 1, cc_load_policy: 0, origin: location.origin
+      },
+      events: {
+        onReady: () => {
+          // YouTube labels the iframe with the video title, which can show as a tooltip
+          const frame = player.getIframe();
+          frame.title = "Video player";
+          new MutationObserver(() => {
+            if (frame.title !== "Video player") frame.title = "Video player";
+          }).observe(frame, { attributes: true, attributeFilter: ["title"] });
+          mode = "armed";
+          setCurtain("Click to play", "", true);
+        },
+        onStateChange: e => handleState(e.data),
+        onError: e => {
+          const why = (e.data === 101 || e.data === 150)
+            ? "The owner doesn't allow this video to play outside YouTube."
+            : "The video isn't available.";
+          setCurtain("This video can't play here", why + " Try the other link for this game in your sheet.", false);
+          setRing(true);
+        }
+      }
+    });
+  };
+
+  // 1 = playing, 2 = paused, 0 = ended
+  function handleState(s) {
+    if (s === 1) {
+      if (finished) { player.pauseVideo(); return; }
+      mode = "playing";
+      setRing(false);
+      $("curtain").hidden = true;
+      $("shield").hidden = $("btnClicks").getAttribute("aria-pressed") === "true";
+      $("maskCorner").hidden = false;
+      flashTopMask();
+      $("btnPlay").textContent = "Pause";
+      $("shield").focus({ preventScroll: true });
+    } else if (s === 2 && !finished) {
+      mode = "paused";
+      setCurtain("Paused", "Press Space or click to resume.", false);
+      $("shield").hidden = false;
+      $("btnPlay").textContent = "Play";
+    } else if (s === 0) {
+      finish();
+    }
+  }
+
+  function finish() {
+    finished = true;
+    mode = "finished";
+    try { player.pauseVideo(); } catch (_) {}
+    setCurtain("Finished", "Mark it watched in your sheet. Restart plays it again.", false);
+    $("shield").hidden = false;
+    $("btnPlay").textContent = "Play";
+  }
+
+  // Also poll the state, in case a state-change event never arrives
+  let lastPolled = null;
+  setInterval(() => {
+    if (!player || !player.getPlayerState) return;
+    const s = player.getPlayerState();
+    if (s !== lastPolled) {
+      lastPolled = s;
+      if (s === 1 && mode !== "playing" && !finished) handleState(1);
+    }
+    if (mode !== "playing") return;
+    const t = player.getCurrentTime(), d = player.getDuration();
+    $("clock").textContent = fmt(t);
+    if (d > 0 && t >= d - trim) finish();
+  }, 250);
+
+  function toggle() {
+    if (!player || mode === "armed" || mode === "loading") return;
+    if (mode === "playing") player.pauseVideo();
+    else if (mode === "paused") player.playVideo();
+  }
+  function seek(delta) {
+    if (!player || !player.getCurrentTime || mode === "armed" || mode === "loading" || finished) return;
+    const d = player.getDuration();
+    let t = player.getCurrentTime() + delta;
+    t = Math.max(0, d > 0 ? Math.min(t, d - trim - 1) : t);
+    player.seekTo(t, true);
+  }
+  function restart() {
+    if (!player || mode === "armed" || mode === "loading") return;
+    finished = false;
+    player.seekTo(0, true);
+    player.playVideo();
+  }
+  function fullscreen() {
+    const w = $("wrap");
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+    else if (w.requestFullscreen) w.requestFullscreen().catch(() => {});
+  }
+
+  $("shield").addEventListener("click", toggle);
+  $("btnPlay").addEventListener("click", toggle);
+  $("btnBack").addEventListener("click", () => seek(-10));
+  $("btnFwd").addEventListener("click", () => seek(10));
+  $("btnRestart").addEventListener("click", restart);
+  $("btnFull").addEventListener("click", fullscreen);
+  $("btnClicks").addEventListener("click", e => {
+    const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+    e.currentTarget.setAttribute("aria-pressed", String(on));
+    e.currentTarget.textContent = on ? "Clicks allowed (turn off)" : "Allow clicks";
+    if (mode === "playing") $("shield").hidden = on;
+  });
+  document.addEventListener("keydown", e => {
+    if (e.target.tagName === "BUTTON" && (e.key === " " || e.key === "Enter")) return;
+    if (e.key === " " || e.key === "k") { e.preventDefault(); toggle(); }
+    else if (e.key === "ArrowLeft" || e.key === "j") seek(-10);
+    else if (e.key === "ArrowRight" || e.key === "l") seek(10);
+    else if (e.key === "f") fullscreen();
+  });
+})();
+</script>
+</body>
+</html>
