@@ -38,7 +38,6 @@ body {
 /* Layers, bottom to top: player, masks, shield, curtain, ring */
 .mask { position: absolute; background: var(--stage); z-index: 2; pointer-events: none; }
 .mask.top { left: 0; right: 0; top: 0; height: 18%; transition: opacity .5s; }
-.mask.corner { right: 0; top: 0; width: 32%; height: 15%; }
 .shield { position: absolute; inset: 0; z-index: 3; cursor: pointer; }
 .curtain {
   position: absolute; inset: 0; z-index: 4; background: var(--curtain);
@@ -75,7 +74,6 @@ button[aria-pressed="true"] { background: var(--accent); color: #111; }
 <div class="wrap" id="wrap">
   <div id="player"></div>
   <div class="mask top" id="maskTop" hidden></div>
-  <div class="mask corner" id="maskCorner" hidden></div>
   <div class="shield" id="shield" tabindex="-1" hidden></div>
   <div class="curtain" id="curtain">
     <div class="disc" id="disc"></div>
@@ -191,7 +189,6 @@ button[aria-pressed="true"] { background: var(--accent); color: #111; }
       $("curtain").hidden = true;
       $("adNote").hidden = true;
       $("shield").hidden = $("btnClicks").getAttribute("aria-pressed") === "true";
-      $("maskCorner").hidden = false;
       flashTopMask();
       $("btnPlay").textContent = "Pause";
       $("shield").focus({ preventScroll: true });
@@ -234,7 +231,6 @@ button[aria-pressed="true"] { background: var(--accent); color: #111; }
     clearTimeout(topTimer);
     $("maskTop").hidden = false;
     $("maskTop").style.opacity = 1;
-    $("maskCorner").hidden = false;
     $("adNote").hidden = false;
   }
 
